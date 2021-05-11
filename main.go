@@ -1,27 +1,26 @@
 package main
 
 import (
-	"crypto/sha1"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/jbub/podcasts"
+	"github.com/tidwall/gjson"
 )
 
 const progname = "rollinss"
-const version = "1.0.0"
+const version = "1.0.1"
 
 const endpoint = "https://www.kcrw.com/music/shows/henry-rollins"
-const mp3link = "https://od-media.kcrw.com/kcrw/audio/website/music/hr/KCRW-henry_rollins-kcrw_broadcast_%d-%s.mp3"
 
 type Episode struct {
 	Title    string
@@ -32,89 +31,79 @@ type Episode struct {
 	Duration time.Duration
 }
 
-// This doesn't really generate a UUID. I'm too lazy to grab the JSON
-// and get the real UUID. sha1 here is good enough
-func genUUID(s string) string {
-	h := sha1.New()
-	h.Write([]byte(s))
-	bs := h.Sum(nil)
-	return fmt.Sprintf("%x", bs)
-}
-
-// Take a string like "2h, 2min" and return a time.Duration
-func getDuration(s string) time.Duration {
-	s = strings.ReplaceAll(s, " ", "")
-	s = strings.ReplaceAll(s, ",", "")
-	s = strings.ReplaceAll(s, "hr", "h")
-	s = strings.ReplaceAll(s, "min", "m")
-	duration, err := time.ParseDuration(s)
+// Fetch given URL
+func get(url string) (string, error) {
+	res, err := http.Get(url)
 	if err != nil {
-		duration = time.Second * 120
+		return "", err
 	}
-	return duration
-}
+	defer res.Body.Close()
 
-// Given an episode number and time.Time, return a URL to
-// the MP3 file for that episode.
-func getMP3URL(epnum int, pubdate time.Time) string {
-	return fmt.Sprintf(mp3link, epnum, pubdate.Format("060102"))
+	if res.StatusCode != 200 {
+		err = errors.New(fmt.Sprintf("status code error: %d %s", res.StatusCode, res.Status))
+		return "", err
+	}
+
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		return "", err
+	}
+
+	return string(body), nil
 }
 
 // Get the episodes from the endpoint
 // Errors will likely be either HTTP errors or HTML parsing errors
 // (e.g. the HTML changed and this needs to be rewritten accordingly)
 func fetchEpisodes(url string) ([]Episode, error) {
-	res, err := http.Get(url)
+	res, err := get(url)
 	if err != nil {
 		return nil, err
 	}
-	defer res.Body.Close()
 
-	if res.StatusCode != 200 {
-		err = errors.New(fmt.Sprintf("status code error: %d %s", res.StatusCode, res.Status))
-		return nil, err
-	}
-
-	doc, err := goquery.NewDocumentFromReader(res.Body)
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(res))
 	if err != nil {
 		return nil, err
 	}
 
 	var episodes []Episode
 
-	doc.Find("div#episodes div.four-col div.single").Each(func(i int, s *goquery.Selection) {
-		link, _ := s.Find("a.title-link").Attr("href")
-		title := s.Find("h3").Text()
-		parts := strings.Split(title, " ")
-		epnumStr := parts[len(parts)-1]
+	doc.Find("div.four-col.hub-row.no-border button.audio").Each(func(i int, s *goquery.Selection) {
+		jurl, exists := s.Attr("data-player-json")
+		if !exists {
+			return
+		}
 
-		// No episode number or no pub date means we can't generate
-		// the link to the MP3, so just return here
-		epnum, err := strconv.Atoi(epnumStr)
+		res, err := get(jurl)
+		if err != nil {
+			return
+		}
+
+		json := string(res)
+		id := gjson.Get(json, "uuid").String()
+		link := gjson.Get(json, "url").String()
+		title := gjson.Get(json, "title").String()
+		mp3 := gjson.Get(json, "media.0.url").String()
+
+		durstr := gjson.Get(json, "duration").Int()
+		duration, err := time.ParseDuration(fmt.Sprintf("%ds", durstr))
 		if err != nil {
 			return
 		}
 
 		var pubdate time.Time
-		datestr, exists := s.Find("time.pubdate").Attr("datetime")
-		if exists {
-			parsed, err := time.Parse("2006-01-02T15:04:05Z", datestr)
-			if err != nil {
-				return
-			}
-			// The time.pubdate HTML is always off by one day for some reason
-			// so we need to subtract one day
-			pubdate = parsed.AddDate(0, 0, -1)
+		datestr := gjson.Get(json, "date").String()
+		parsed, err := time.Parse("2006-01-02T15:04:05Z", datestr)
+		if err != nil {
+			return
 		}
-
-		duration := getDuration(s.Find("span.duration").Text())
-		mp3 := getMP3URL(epnum, pubdate)
+		pubdate = parsed.AddDate(0, 0, -1)
 
 		episode := Episode{
 			Title:    title,
 			Link:     link,
 			MP3:      mp3,
-			UUID:     genUUID(fmt.Sprintf("%s-%s", title, mp3)),
+			UUID:     id,
 			PubDate:  pubdate,
 			Duration: duration,
 		}
