@@ -1,10 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"errors"
-	"flag"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -21,6 +20,32 @@ const progname = "rollinss"
 const version = "1.0.1"
 
 const endpoint = "https://www.kcrw.com/music/shows/henry-rollins"
+
+const html = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>fanatic!</title>
+    <style type="text/css">
+     body{font:0.8em sans-serif;margin:40px;}
+     h1{font-size:1.2em;}
+     h1 span{color:#ddd;}
+     h1:hover span {color:black;}
+     a:link,a:visited{border-bottom:1px solid #ccc;color:inherit;text-decoration:none;}
+     a:hover,a:active{background:#ff0;}
+     ul{margin:2em 0;padding:0;}
+     ul li{line-height:1.2rem;list-style-type:none;}
+     footer{bottom:40px;color:#ccc;position:absolute;}
+    </style>
+</head>
+<body>
+    <h1>fanatic!</h1>
+    <p>providing an <a href="/rss.xml">RSS feed</a> for Henry Rollins' <a href="https://www.kcrw.com/music/shows/henry-rollins">KCRW show</a> (because they don't)</p>
+    <footer>n.b. none of the shows are hosted here. be cool ~<a href="https://djl.io/">author</a></footer>
+</body>
+</html>
+`
 
 type Episode struct {
 	Title    string
@@ -118,20 +143,10 @@ func fetchEpisodes(url string) ([]Episode, error) {
 	return episodes, nil
 }
 
-func main() {
-	var fileName = flag.String("f", "", "file to write to (default: stdout)")
-	var showVersion = flag.Bool("v", false, "show version information and exit")
-
-	flag.Parse()
-
-	if *showVersion {
-		fmt.Printf("%s %s\n", progname, version)
-		os.Exit(0)
-	}
-
+func generateXML() (string, error) {
 	episodes, err := fetchEpisodes(endpoint)
 	if err != nil {
-		log.Fatal(err)
+		return "", err
 	}
 
 	podcast := podcasts.Podcast{
@@ -157,17 +172,54 @@ func main() {
 
 	feed, err := podcast.Feed()
 	if err != nil {
-		log.Fatal(err)
+		return "", nil
+	}
+	var b bytes.Buffer
+	feed.Write(&b)
+	return b.String(), nil
+
+}
+
+func main() {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
 	}
 
-	var file io.Writer = os.Stdout
-
-	if *fileName != "" {
-		file, err = os.Create(*fileName)
-		if err != nil {
-			log.Fatal(err)
+	xml, err := generateXML()
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		for {
+			<-ticker.C
+			xml, err = generateXML()
+			log.Println("Fetching XML...")
+			if err != nil {
+				log.Println(fmt.Sprintf("Error fetching XML: %s", err))
+			}
 		}
-	}
+	}()
 
-	feed.Write(file)
+	http.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if req.URL.Path != "/" {
+			w.WriteHeader(404)
+			w.Write([]byte("Not Found!"))
+			return
+		}
+
+		w.Write([]byte(html))
+		return
+	})
+
+	http.HandleFunc("/rss.xml", func(w http.ResponseWriter, req *http.Request) {
+		if err != nil {
+			w.Write([]byte(fmt.Sprintf("error!\n%s", err)))
+			return
+		}
+		w.Header().Set("Content-Type", "text/xml")
+		w.Write([]byte(xml))
+	})
+
+	log.Println("listening on", port)
+	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
