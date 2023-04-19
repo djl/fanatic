@@ -16,8 +16,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-const progname = "rollinss"
-const version = "1.0.1"
+const progname = "fanatic"
 
 const endpoint = "https://www.kcrw.com/music/shows/henry-rollins"
 
