@@ -16,8 +16,6 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-const progname = "fanatic"
-
 const endpoint = "https://www.kcrw.com/music/shows/henry-rollins"
 
 const html = `
@@ -57,6 +55,7 @@ type Episode struct {
 
 // Fetch given URL
 func get(url string) (string, error) {
+	log.Printf("fetching url %s", url)
 	res, err := http.Get(url)
 	if err != nil {
 		return "", err
@@ -64,7 +63,7 @@ func get(url string) (string, error) {
 	defer res.Body.Close()
 
 	if res.StatusCode != 200 {
-		err = errors.New(fmt.Sprintf("status code error: %d %s", res.StatusCode, res.Status))
+		err = fmt.Errorf("status code error: %d %s", res.StatusCode, res.Status)
 		return "", err
 	}
 
@@ -136,7 +135,7 @@ func fetchEpisodes(url string) ([]Episode, error) {
 	})
 
 	if len(episodes) < 1 {
-		return nil, errors.New("No episodes found.")
+		return nil, errors.New("no episodes found")
 	}
 
 	return episodes, nil
@@ -185,15 +184,16 @@ func main() {
 		port = "8080"
 	}
 
+	log.Println("listening on", port)
+
 	xml, err := generateXML()
 	go func() {
 		ticker := time.NewTicker(time.Hour)
 		for {
 			<-ticker.C
 			xml, err = generateXML()
-			log.Println("Fetching XML...")
 			if err != nil {
-				log.Println(fmt.Sprintf("Error fetching XML: %s", err))
+				log.Printf("error generating XML: %s", err)
 			}
 		}
 	}()
@@ -207,7 +207,6 @@ func main() {
 		}
 
 		w.Write([]byte(html))
-		return
 	})
 
 	http.HandleFunc("/rss.xml", func(w http.ResponseWriter, req *http.Request) {
@@ -219,6 +218,5 @@ func main() {
 		w.Write([]byte(xml))
 	})
 
-	log.Println("listening on", port)
 	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
